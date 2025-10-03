@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KrushiAi - Smart Farmer Decision Portal</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+<style>
+body { font-family: Arial, sans-serif; margin:0; background:#f5f5f5; }
+header { background:#2e7d32; color:#fff; padding:15px 20px; display:flex; justify-content:space-between; align-items:center; }
+header h1 { margin:0; font-size:22px; }
+nav a { color:#fff; margin-left:15px; text-decoration:none; font-weight:bold; }
+nav a.active { text-decoration:underline; }
+.container { max-width:1200px; margin:auto; padding:20px; }
+.card { background:#fff; border-radius:10px; padding:15px; margin-bottom:15px; box-shadow:0 3px 6px rgba(0,0,0,0.1); }
+#map { height:400px; border-radius:10px; margin-top:15px; }
+.badge { padding:4px 8px; border-radius:6px; font-weight:bold; font-size:13px; margin-left:10px; color:#fff; }
+.badge.safe { background:#4caf50; }
+.badge.warning { background:#ff9800; }
+label,input,select,button { display:block; margin:5px 0; }
+input,select { padding:5px; width:150px; }
+button { padding:5px 10px; background:#2e7d32; color:#fff; border:none; border-radius:5px; cursor:pointer; }
+button:hover { background:#1b5e20; }
+canvas { background:#fff; border-radius:10px; padding:10px; }
+</style>
+</head>
+<body>
+
+<header>
+<h1>🌾 KrushiAi - Smart Farmer Decision Portal</h1>
+<nav><a href="#" class="active">Home</a></nav>
+</header>
+
+<div class="container">
+
+<h2>📋 Crop & Farmer Details</h2>
+<div class="card">
+  <label for="cropSelect">Select Crop:</label>
+  <select id="cropSelect">
+    <option value="Tomato">Tomato</option>
+    <option value="Potato">Potato</option>
+    <option value="Onion">Onion</option>
+  </select>
+
+  <label for="quantity">Quantity (kg):</label>
+  <input type="number" id="quantity" value="100">
+
+  <label>Farmer Location:</label>
+  <input type="number" id="farmerLat" placeholder="Latitude" value="19.05">
+  <input type="number" id="farmerLon" placeholder="Longitude" value="73.85">
+
+  <label for="ratePerKm">Transport Rate (₹/km):</label>
+  <input type="number" id="ratePerKm" value="10">
+
+  <button onclick="updatePortal()">Show Recommendations</button>
+</div>
+
+<h2>🌦 Weather Alerts</h2>
+<div id="weatherAlerts"></div>
+
+<h2>📦 Cold Storages & Transport</h2>
+<div id="storageCards"></div>
+
+<h2>💰 Top Mandi Suggestions & Best Day to Sell</h2>
+<div id="bestMandis"></div>
+
+<h2>📈 Net Profit Chart - Best Day to Sell</h2>
+<canvas id="profitChart" height="200"></canvas>
+
+<h3>🗺 Map - Farmer, Mandi & Cold Storage</h3>
+<div id="map"></div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+// --- Demo Data ---
+const storages = [
+  { name:"Mumbai Cold Storage 1", lat:19.080, lon:72.880, rate:20, crops:["Tomato","Onion"] },
+  { name:"Mumbai Cold Storage 2", lat:19.070, lon:72.875, rate:18, crops:["Potato","Tomato"] },
+  { name:"Pune Cold Storage A", lat:18.525, lon:73.860, rate:22, crops:["Potato","Tomato"] },
+  { name:"Pune Cold Storage B", lat:18.515, lon:73.855, rate:25, crops:["Potato"] },
+  { name:"Nashik Cold Storage X", lat:20.010, lon:73.795, rate:19, crops:["Onion"] }
+];
+
+const mandis = [
+  { name:"Mumbai Mandi", lat:19.075, lon:72.877, pricesForecast:{
+      Tomato:[22,24,23], Potato:[15,16,17], Onion:[30,32,31]
+    }
+  },
+  { name:"Pune Mandi", lat:18.520, lon:73.855, pricesForecast:{
+      Tomato:[21,22,23], Potato:[16,17,18], Onion:[28,29,30]
+    }
+  },
+  { name:"Nashik Mandi", lat:20.011, lon:73.791, pricesForecast:{
+      Tomato:[20,21,22], Potato:[14,15,16], Onion:[32,34,33]
+    }
+  }
+];
+
+// --- Weather Alerts ---
+function showWeather(lat, lon){
+  const alertsDiv = document.getElementById("weatherAlerts");
+  alertsDiv.innerHTML = "";
+  if(lat>19){ 
+    alertsDiv.innerHTML += '<div class="card badge.warning">⚠️ Heavy rain expected in your area. Protect crops.</div>';
+  } else {
+    alertsDiv.innerHTML += '<div class="card badge.safe">🌞 Sunny weather. Good for harvest.</div>';
+  }
+}
+
+// --- Distance ---
+function distance(lat1, lon1, lat2, lon2){
+  const R=6371;
+  const dLat=(lat2-lat1)*Math.PI/180;
+  const dLon=(lon2-lon1)*Math.PI/180;
+  const a=Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+// --- Map ---
+let map = L.map('map').setView([19.05,73.85], 7);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18}).addTo(map);
+let markersLayer = L.layerGroup().addTo(map);
+
+// --- Main Function ---
+function updatePortal(){
+  const crop = document.getElementById("cropSelect").value;
+  const qty = parseFloat(document.getElementById("quantity").value);
+  const lat = parseFloat(document.getElementById("farmerLat").value);
+  const lon = parseFloat(document.getElementById("farmerLon").value);
+  const rate = parseFloat(document.getElementById("ratePerKm").value);
+
+  showWeather(lat, lon);
+
+  // --- Filter storages ---
+  let eligibleStorages = storages.filter(s => s.crops.includes(crop));
+  eligibleStorages.forEach(s => s.dist = distance(lat, lon, s.lat, s.lon));
+  eligibleStorages.sort((a,b)=>a.dist-b.dist);
+  const nearestStorage = eligibleStorages[0];
+
+  // Display storages
+  const storageContainer = document.getElementById("storageCards");
+  storageContainer.innerHTML = "";
+  eligibleStorages.forEach(s=>{
+    storageContainer.innerHTML += `
+      <div class="card ${s===nearestStorage?"safe":"warning"}">
+        <h4>${s.name} ${s===nearestStorage?'<span class="badge safe">Nearest</span>':''}</h4>
+        Distance: ${s.dist.toFixed(1)} km<br>
+        Storage Rate: ₹${s.rate}/day
+      </div>
+    `;
+  });
+
+  // Calculate net profit per mandi & storage
+  let mandiSuggestions = [];
+  let chartData = {};
+  mandis.forEach(m=>{
+    if(!(crop in m.pricesForecast)) return;
+    let prices = m.pricesForecast[crop];
+    chartData[m.name] = [];
+    let bestDayIndex = 0;
+    let bestNetProfit = -Infinity;
+    let bestStorage = null;
+
+    prices.forEach((price, idx)=>{
+      eligibleStorages.forEach(s=>{
+        const transportCost = rate * s.dist;
+        const storageCost = s.rate * 1;
+        const netProfit = qty*price - transportCost - storageCost;
+        chartData[m.name].push(netProfit.toFixed(2));
+        if(netProfit > bestNetProfit){
+          bestNetProfit = netProfit;
+          bestDayIndex = idx;
+          bestStorage = s;
+        }
+      });
+    });
+
+    mandiSuggestions.push({
+      name:m.name,
+      bestDay: bestDayIndex+1,
+      price: m.pricesForecast[crop][bestDayIndex],
+      netProfit: bestNetProfit,
+      storage: bestStorage
+    });
+  });
+
+  mandiSuggestions.sort((a,b)=>b.netProfit - a.netProfit);
+
+  // Display top 3 mandis
+  const bestMandisDiv = document.getElementById("bestMandis");
+  bestMandisDiv.innerHTML = "";
+  mandiSuggestions.slice(0,3).forEach(m=>{
+    bestMandisDiv.innerHTML += `
+      <div class="card safe">
+        <h4>${m.name}</h4>
+        Best Day to Sell: Day ${m.bestDay}<br>
+        Crop Price: ₹${m.price}/kg<br>
+        Estimated Net Profit: ₹${m.netProfit.toFixed(2)}<br>
+        Recommended Storage: ${m.storage.name} (${m.storage.dist.toFixed(1)} km, ₹${m.storage.rate}/day)
+      </div>
+    `;
+  });
+
+  // --- Plot Chart ---
+  const ctx = document.getElementById("profitChart").getContext('2d');
+  if(window.profitChart) window.profitChart.destroy();
+  window.profitChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: ['Day 1','Day 2','Day 3'],
+      datasets: Object.keys(chartData).map((mandi, idx)=>({
+        label: mandi,
+        data: chartData[mandi],
+        borderColor: ['red','blue','green'][idx],
+        backgroundColor:'transparent',
+        tension:0.2
+      }))
+    },
+    options: {
+      responsive:true,
+      plugins:{legend:{position:'top'}},
+      scales:{y:{title:{display:true,text:'Net Profit (₹)'}}}
+    }
+  });
+
+  // --- Map ---
+  markersLayer.clearLayers();
+  L.marker([lat, lon]).addTo(markersLayer).bindPopup("🌱 Farmer Location").openPopup();
+  eligibleStorages.forEach(s=>{
+    L.circleMarker([s.lat, s.lon],{
+      radius:8,
+      color:s===nearestStorage?"green":"blue",
+      fillOpacity:0.8
+    }).addTo(markersLayer).bindPopup(`📦 ${s.name} - ₹${s.rate}/day`);
+  });
+  mandis.forEach(m=>{
+    L.marker([m.lat, m.lon], {icon:L.icon({iconUrl:"https://maps.google.com/mapfiles/ms/icons/red-dot.png",iconSize:[32,32]})})
+      .addTo(markersLayer)
+      .bindPopup(`🏪 ${m.name}`);
+  });
+  map.setView([lat, lon], 7);
+}
+</script>
+</body>
+</html>
